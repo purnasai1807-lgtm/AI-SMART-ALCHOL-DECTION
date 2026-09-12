@@ -14,6 +14,11 @@ const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toSt
 const TECHNICAL_TEAM_EMAIL = process.env.TECHNICAL_TEAM_EMAIL;
 const TECHNICAL_TEAM_PASSWORD = process.env.TECHNICAL_TEAM_PASSWORD;
 const APP_ORIGIN = process.env.APP_ORIGIN;
+const INTERLOCK_ATTESTATION_SECRET = process.env.INTERLOCK_ATTESTATION_SECRET;
+const configuredAttestationAge = Number(process.env.ATTESTATION_MAX_AGE_MS);
+const ATTESTATION_MAX_AGE_MS = Number.isFinite(configuredAttestationAge) && configuredAttestationAge > 0 ? configuredAttestationAge : 300000;
+const configuredThreshold = Number(process.env.ALCOHOL_THRESHOLD);
+const ALCOHOL_THRESHOLD = Number.isFinite(configuredThreshold) && configuredThreshold >= 0 ? configuredThreshold : 0.02;
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 async function main() {
 const SQL = await initSqlJs({ locateFile: (file) => path.join(__dirname, 'node_modules', 'sql.js', 'dist', file) });
@@ -81,6 +86,27 @@ db.run(`
     token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS interlock_vehicles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    vin TEXT NOT NULL UNIQUE, make TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'LOCKED' CHECK (state IN ('LOCKED','UNLOCKED')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS interlock_devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL UNIQUE,
+    vehicle_id INTEGER REFERENCES interlock_vehicles(id) ON DELETE SET NULL,
+    secret_ciphertext TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS interlock_nonces (
+    device_id TEXT NOT NULL, nonce TEXT NOT NULL, received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (device_id, nonce)
+  );
+  CREATE TABLE IF NOT EXISTS interlock_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, vehicle_id INTEGER, device_id TEXT, decision TEXT NOT NULL,
+    reason TEXT NOT NULL, reading REAL, attested INTEGER NOT NULL DEFAULT 0,
+    nonce TEXT, measured_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 const app = express();
@@ -104,6 +130,17 @@ const eventSchema = z.object({
 });
 const slugify = (value) => `${value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}-${crypto.randomBytes(3).toString('hex')}`;
 const hashToken = (token) => crypto.createHmac('sha256', SESSION_SECRET).update(token).digest('hex');
+const encryptionKey = crypto.createHash('sha256').update(SESSION_SECRET).digest();
+const encryptSecret = (secret) => {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', encryptionKey, iv);
+  const value = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
+  return `${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${value.toString('base64url')}`;
+};
+const decryptSecret = (encoded) => {
+  const [iv, tag, value] = encoded.split('.'); const decipher = crypto.createDecipheriv('aes-256-gcm', encryptionKey, Buffer.from(iv, 'base64url'));
+  decipher.setAuthTag(Buffer.from(tag, 'base64url')); return Buffer.concat([decipher.update(Buffer.from(value, 'base64url')), decipher.final()]).toString('utf8');
+};
 const publicUser = (user) => ({ id: user.id, name: user.name, email: user.email, role: user.role });
 const issue = (res, status, message, details) => res.status(status).json({ error: message, ...(details ? { details } : {}) });
 const audit = (req, action, entityType, entityId, metadata = {}) => sql(
@@ -220,6 +257,106 @@ app.post('/api/auth/password-reset/complete', (req, res) => {
   sql('DELETE FROM sessions WHERE user_id=?').run(token.user_id);
   audit(req, 'PASSWORD_RESET_COMPLETED', 'USER', token.user_id);
   res.json({ ok: true });
+});
+
+// Versioned vehicle interlock demonstrator API. A decision is fail-secure: any
+// missing, stale, replayed, or unverifiable device report keeps the vehicle locked.
+const interlockDeviceSchema = z.object({
+  deviceId: z.string().trim().min(3).max(100),
+  vehicleId: z.coerce.number().int().positive(),
+  nonce: z.string().trim().min(16).max(200),
+  timestamp: z.string().datetime({ offset: true }),
+  signature: z.string().trim().min(16).max(256),
+  reading: z.coerce.number().finite().min(0).max(10)
+});
+const decisionFor = (reading, valid) => {
+  if (!valid) return { decision: 'LOCKED', reason: 'ATTESTATION_INVALID' };
+  return reading < ALCOHOL_THRESHOLD
+    ? { decision: 'UNLOCKED', reason: 'ALCOHOL_BELOW_THRESHOLD' }
+    : { decision: 'LOCKED', reason: 'ALCOHOL_THRESHOLD_EXCEEDED' };
+};
+function verifyInterlockReport(data) {
+  const device = sql('SELECT * FROM interlock_devices WHERE device_id=? AND active=1').get(data.deviceId);
+  if (!device || Number(device.vehicle_id) !== data.vehicleId) return { valid: false, device };
+  const measured = Date.parse(data.timestamp);
+  if (!Number.isFinite(measured) || Math.abs(Date.now() - measured) > ATTESTATION_MAX_AGE_MS) return { valid: false, device };
+  try {
+    const message = `${data.deviceId}.${data.vehicleId}.${data.nonce}.${data.timestamp}.${data.reading}`;
+    const expected = crypto.createHmac('sha256', decryptSecret(device.secret_ciphertext)).update(message).digest('hex');
+    const supplied = data.signature.replace(/^sha256=/, '').toLowerCase();
+    if (supplied.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) return { valid: false, device };
+    try { sql('INSERT INTO interlock_nonces (device_id,nonce) VALUES (?,?)').run(data.deviceId, data.nonce); } catch { return { valid: false, device, replay: true }; }
+    return { valid: true, device };
+  } catch { return { valid: false, device }; }
+}
+function recordInterlockDecision(data, result, valid) {
+  sql(`INSERT INTO interlock_decisions
+    (vehicle_id,device_id,decision,reason,reading,attested,nonce,measured_at)
+    VALUES (?,?,?,?,?,?,?,?)`).run(data.vehicleId, data.deviceId, result.decision, result.reason,
+    data.reading, valid ? 1 : 0, data.nonce || null, data.timestamp || null);
+  sql('UPDATE interlock_vehicles SET state=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(result.decision, data.vehicleId);
+  sql(`INSERT INTO audit_logs (actor_id,action,entity_type,entity_id,metadata,ip)
+    VALUES (NULL,?,?,?,?,NULL)`).run('INTERLOCK_DECISION', 'INTERLOCK_VEHICLE', String(data.vehicleId),
+    JSON.stringify({ deviceId: data.deviceId || null, decision: result.decision, reason: result.reason, attested: valid }));
+}
+app.use('/api/v1/interlock', (req, res, next) => {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return requireSameOrigin(req, res, next);
+  next();
+});
+app.post('/api/v1/interlock/devices', requireAuth, requireTechnicalTeam, (req, res) => {
+  const parsed = z.object({ deviceId: z.string().trim().min(3).max(100), vehicleId: z.coerce.number().int().positive(), secret: z.string().min(16).max(256).optional() }).safeParse(req.body);
+  if (!parsed.success) return issue(res, 400, 'deviceId, vehicleId, and a secret of at least 16 characters are required');
+  if (!sql('SELECT id FROM interlock_vehicles WHERE id=?').get(parsed.data.vehicleId)) return issue(res, 404, 'Vehicle not found');
+  const secret = parsed.data.secret || INTERLOCK_ATTESTATION_SECRET || crypto.randomBytes(32).toString('hex');
+  try {
+    const result = sql('INSERT INTO interlock_devices (device_id,vehicle_id,secret_ciphertext) VALUES (?,?,?)').run(parsed.data.deviceId, parsed.data.vehicleId, encryptSecret(secret));
+    audit(req, 'REGISTER', 'INTERLOCK_DEVICE', result.lastInsertRowid, { deviceId: parsed.data.deviceId });
+    res.status(201).json({ deviceId: parsed.data.deviceId, vehicleId: parsed.data.vehicleId, secret });
+  } catch (error) { if (error.message?.includes('UNIQUE')) return issue(res, 409, 'Device already exists'); throw error; }
+});
+app.post('/api/v1/interlock/vehicles', requireAuth, (req, res) => {
+  const parsed = z.object({ vin: z.string().trim().regex(/^[A-Za-z0-9-]{6,32}$/), make: z.string().trim().max(80).default(''), model: z.string().trim().max(80).default('') }).safeParse(req.body);
+  if (!parsed.success) return issue(res, 400, 'A valid vehicle identification number is required');
+  try {
+    const result = sql('INSERT INTO interlock_vehicles (user_id,vin,make,model) VALUES (?,?,?,?)').run(req.user.id, parsed.data.vin, parsed.data.make, parsed.data.model);
+    audit(req, 'CREATE', 'INTERLOCK_VEHICLE', result.lastInsertRowid);
+    res.status(201).json({ vehicle: sql('SELECT id,vin,make,model,state,created_at createdAt FROM interlock_vehicles WHERE id=?').get(result.lastInsertRowid) });
+  } catch (error) { if (error.message?.includes('UNIQUE')) return issue(res, 409, 'Vehicle already exists'); throw error; }
+});
+app.get('/api/v1/interlock/vehicles', requireAuth, (req, res) => res.json({ vehicles: sql('SELECT id,vin,make,model,state,created_at createdAt,updated_at updatedAt FROM interlock_vehicles WHERE user_id=? ORDER BY id DESC').all(req.user.id) }));
+app.get('/api/v1/interlock/operations/vehicles', requireAuth, requireTechnicalTeam, (_req, res) => res.json({
+  vehicles: sql(`SELECT v.id,v.vin,v.make,v.model,v.state,v.user_id userId,
+    u.name ownerName,u.email ownerEmail,d.device_id deviceId,d.active deviceActive
+    FROM interlock_vehicles v LEFT JOIN users u ON u.id=v.user_id
+    LEFT JOIN interlock_devices d ON d.vehicle_id=v.id ORDER BY v.id DESC LIMIT 500`).all()
+}));
+app.get('/api/v1/interlock/operations/devices', requireAuth, requireTechnicalTeam, (_req, res) => res.json({
+  devices: sql(`SELECT d.device_id deviceId,d.vehicle_id vehicleId,d.active,d.created_at createdAt,
+    v.vin,v.make,v.model FROM interlock_devices d LEFT JOIN interlock_vehicles v ON v.id=d.vehicle_id
+    ORDER BY d.created_at DESC LIMIT 500`).all()
+}));
+app.post(['/api/v1/interlock/attest', '/api/v1/interlock/decision', '/api/v1/interlock/decisions', '/api/v1/interlock/simulator/attest'], (req, res) => {
+  const parsed = interlockDeviceSchema.safeParse(req.body);
+  const data = parsed.success ? parsed.data : (req.body || {});
+  const attestation = parsed.success ? verifyInterlockReport(data) : { valid: false };
+  const result = decisionFor(Number(data.reading), attestation.valid);
+  // Never let an unauthenticated malformed request mutate an arbitrary vehicle.
+  // Only a known device-to-vehicle pairing may create a persistent fail-secure record.
+  if (attestation.device && Number(attestation.device.vehicle_id) === Number(data.vehicleId)) {
+    recordInterlockDecision(data, result, attestation.valid);
+  }
+  res.status(attestation.valid ? 200 : 401).json({ decision: result.decision, reason: result.reason, attested: attestation.valid, failSecure: !attestation.valid });
+});
+app.get('/api/v1/interlock/vehicles/:id', requireAuth, (req, res) => {
+  const vehicle = sql('SELECT id,vin,make,model,state,created_at createdAt,updated_at updatedAt FROM interlock_vehicles WHERE id=? AND user_id=?').get(req.params.id, req.user.id);
+  if (!vehicle) return issue(res, 404, 'Vehicle not found');
+  res.json({ vehicle });
+});
+app.get('/api/v1/interlock/vehicles/:id/decisions', requireAuth, (req, res) => {
+  const vehicle = sql('SELECT id FROM interlock_vehicles WHERE id=? AND user_id=?').get(req.params.id, req.user.id);
+  if (!vehicle) return issue(res, 404, 'Vehicle not found');
+  res.json({ decisions: sql(`SELECT id,vehicle_id vehicleId,device_id deviceId,decision,reason,reading,attested,nonce,measured_at measuredAt,created_at createdAt
+    FROM interlock_decisions WHERE vehicle_id=? ORDER BY id DESC LIMIT 100`).all(vehicle.id) });
 });
 
 app.get('/api/events', (req, res) => {

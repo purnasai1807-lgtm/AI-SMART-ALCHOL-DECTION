@@ -1,6 +1,13 @@
-# TensorHub
+# Interlock / TensorHub demonstrator
 
-TensorHub is a responsive event-discovery and technical-community application. It includes public, paginated event discovery with external registration links; member accounts with secure password hashes and opaque server-side sessions; Technical Team/Admin event and challenge management APIs; and a coding-test submission contract that queues source for an isolated worker without executing it in the web process.
+This repository includes the original TensorHub event and challenge features plus a secure, end-to-end alcohol-detection vehicle interlock demonstrator. The installable responsive PWA exposes versioned `/api/v1/interlock` APIs, SQL.js persistence, simulator/device HMAC attestation, nonce replay and timestamp freshness checks, authenticated roles, and append-only decisions/audit records.
+
+## Interlock API
+
+Vehicles start `LOCKED`. Authenticated members can create and list their vehicles (`POST/GET /api/v1/interlock/vehicles`). Technical Team or Admin operators pair a simulator (`POST /api/v1/interlock/devices`); the response contains the one-time demonstrator secret, which must be kept by the device. A device signs the canonical string
+`deviceId.vehicleId.nonce.timestamp.reading` with HMAC-SHA256 (hex signature) and posts it to `POST /api/v1/interlock/attest` (the `/decision` alias is also supported). Timestamps must be within `ATTESTATION_MAX_AGE_MS` (default five minutes), and each nonce is single-use. Invalid signatures, stale messages, unknown devices, malformed payloads, and replayed nonces always produce a persisted `LOCKED` decision. A valid reading below `ALCOHOL_THRESHOLD` (default `0.02`) produces `UNLOCKED`; all decisions are queryable by the vehicle owner.
+
+Device secrets are encrypted at rest with the session secret. Set a durable `SESSION_SECRET` and unique per-device secrets in production. This is a demonstrator contract, not a certified safety-critical automotive controller; use independent hardware safety validation before any real vehicle integration.
 
 ## Run locally
 
@@ -44,3 +51,21 @@ All mutating API routes require a same-origin `Origin`/`Referer` check, authenti
 npm test
 npm run lint
 ```
+
+## FastAPI production foundation
+
+The additive `services/api` package provides a SQLAlchemy-backed FastAPI
+service for organizations, vehicles, drivers, devices, authentication, and
+fail-secure safety decisions. It defaults to SQLite for the demo flow and
+accepts PostgreSQL and Redis URLs in production. Start it with:
+
+```sh
+cd services/api
+py -3 -m pip install -r requirements.txt
+py -3 -m uvicorn app.main:app --reload
+```
+
+`docker compose up --build` runs the API with PostgreSQL and Redis without
+changing or replacing the existing Node application. See
+`shared/api-types.md`, `hardware/esp32/`, and `simulator/` for the device
+boundary and signed-reading contract.
