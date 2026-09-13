@@ -39,6 +39,14 @@ class Driver(Base):
     license_number: Mapped[str] = mapped_column(String(80), unique=True)
     organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"))
 
+class DriverAssignment(Base):
+    __tablename__ = "driver_assignments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    driver_id: Mapped[int] = mapped_column(ForeignKey("drivers.id"), index=True)
+    vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id"), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
 
 class Device(Base):
     __tablename__ = "devices"
@@ -47,6 +55,9 @@ class Device(Base):
     secret_ciphertext: Mapped[str] = mapped_column(String(512))
     vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id"))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_ip: Mapped[str | None] = mapped_column(String(64))
 
 
 class Decision(Base):
@@ -66,6 +77,36 @@ class Incident(Base):
     decision_id: Mapped[int] = mapped_column(ForeignKey("decisions.id"))
     severity: Mapped[str] = mapped_column(String(20), default="HIGH")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acknowledged_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+
+class SensorTest(Base):
+    __tablename__ = "sensor_tests"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id"), index=True)
+    device_id: Mapped[int | None] = mapped_column(ForeignKey("devices.id"))
+    samples: Mapped[list] = mapped_column(JSON)
+    decision: Mapped[str] = mapped_column(String(20))
+    reason: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
+    organization_id: Mapped[int | None] = mapped_column(ForeignKey("organizations.id"))
+    title: Mapped[str] = mapped_column(String(200))
+    message: Mapped[str] = mapped_column(Text)
+    read: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+class GPSPoint(Base):
+    __tablename__ = "gps_points"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id"), index=True)
+    latitude: Mapped[float] = mapped_column(Float)
+    longitude: Mapped[float] = mapped_column(Float)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class AuditLog(Base):
@@ -82,3 +123,11 @@ class NonceRecord(Base):
     __tablename__ = "nonce_records"
     nonce: Mapped[str] = mapped_column(String(128), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

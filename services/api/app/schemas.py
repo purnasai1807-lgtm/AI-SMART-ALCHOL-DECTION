@@ -22,8 +22,8 @@ class VehicleIn(BaseModel):
 
 
 class DriverIn(BaseModel):
-    name: str
-    license_number: str
+    name: str = Field(min_length=2, max_length=200)
+    license_number: str = Field(min_length=4, max_length=80)
     organization_id: int
 
 
@@ -50,3 +50,26 @@ class DecisionOut(BaseModel):
     reason: str
     reading: float | None
     created_at: datetime
+
+class AssignmentIn(BaseModel):
+    driver_id: int
+    vehicle_id: int
+
+class HeartbeatIn(BaseModel):
+    status: str = Field(default="online", pattern="^(online|warning|error|offline)$")
+
+class SensorTestIn(BaseModel):
+    vehicle_id: int
+    device_id: int | None = None
+    samples: list[float] = Field(min_length=3, max_length=20)
+
+class GPSIn(BaseModel):
+    vehicle_id: int
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    recorded_at: datetime | None = None
+
+class NotificationIn(BaseModel):
+    title: str = Field(min_length=2, max_length=200)
+    message: str = Field(min_length=1, max_length=2000)
+    user_id: int | None = None

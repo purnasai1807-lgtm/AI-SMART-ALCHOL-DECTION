@@ -5,3 +5,4 @@ data/*.db-*
 npm-debug.log*
 __pycache__/
 *.py[cod]
+.pytest_cache/
