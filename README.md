@@ -90,6 +90,10 @@ Operational, privacy, security, hardware, deployment, API, and architecture
 guidance is in `docs/`. See `docs/OPERATIONS.md` for the local end-to-end
 startup sequence and production gates.
 
+The consolidated product runbook is in
+`docs/PRODUCT_IMPLEMENTATION.md`. It maps every implemented module to its
+startup, end-to-end acceptance, security, hardware, and production workflow.
+
 ## Hardware implementation status
 
 The repository now includes a PlatformIO ESP32 bench application, wiring/pin
