@@ -9,7 +9,11 @@ const initSqlJs = require('sql.js');
 const { z } = require('zod');
 
 const PORT = Number(process.env.PORT || 3000);
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'tensorhub.db');
+// Vercel's deployment filesystem is read-only except for /tmp. The SQLite
+// database remains suitable for the single-instance demo deployment only;
+// production scale requires PostgreSQL/Redis via services/api.
+const DB_PATH = process.env.DB_PATH
+  || (process.env.VERCEL ? path.join('/tmp', 'tensorhub.db') : path.join(__dirname, 'data', 'tensorhub.db'));
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const TECHNICAL_TEAM_EMAIL = process.env.TECHNICAL_TEAM_EMAIL;
 const TECHNICAL_TEAM_PASSWORD = process.env.TECHNICAL_TEAM_PASSWORD;
