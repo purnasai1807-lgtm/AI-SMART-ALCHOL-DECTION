@@ -6,6 +6,9 @@ state machine, sensor input, status indicators, heartbeat boundary, and
 fail-closed output behavior. It is not a certified breathalyzer or automotive
 immobilizer controller.
 
+For the complete assembly, configuration, flashing, verification, and
+production-gate procedure, see `docs/HARDWARE_CONFIGURATION.md`.
+
 ## Hardware bill of materials
 
 - ESP32 DevKit board with secure boot/flash encryption enabled for production

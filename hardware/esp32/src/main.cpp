@@ -2,6 +2,7 @@
 #include <esp_task_wdt.h>
 
 #include "../device_adapter.h"
+#include "../include/hardware_config.h"
 
 // Bench-safe ESP32 reference firmware. GPIO26 is an isolated dummy-load
 // signal only. A certified automotive gateway must enforce any real interlock.
@@ -17,18 +18,21 @@ enum class DeviceState {
   OFFLINE
 };
 
-constexpr uint8_t STATUS_LED_PIN = 2;
-constexpr uint8_t BUZZER_PIN = 25;
-constexpr uint8_t BENCH_OUTPUT_PIN = 26;
-constexpr uint8_t SENSOR_PIN = 34;
-constexpr uint8_t TEST_BUTTON_PIN = 27;
-constexpr uint8_t SAMPLE_COUNT = 5;
-constexpr uint32_t SENSOR_WARMUP_MS = 30000;
-constexpr uint32_t SAMPLE_INTERVAL_MS = 250;
-constexpr uint32_t TEST_INTERVAL_MS = 5000;
-constexpr uint32_t HEARTBEAT_INTERVAL_MS = 30000;
-constexpr uint32_t WATCHDOG_TIMEOUT_SECONDS = 8;
-constexpr float DEMO_THRESHOLD = 0.02f;
+static_assert(INTERLOCK_BENCH_ONLY == 1,
+              "Only the bench-safe reference build is supported");
+constexpr uint8_t STATUS_LED_PIN = INTERLOCK_STATUS_LED_PIN;
+constexpr uint8_t BUZZER_PIN = INTERLOCK_BUZZER_PIN;
+constexpr uint8_t BENCH_OUTPUT_PIN = INTERLOCK_BENCH_OUTPUT_PIN;
+constexpr uint8_t SENSOR_PIN = INTERLOCK_SENSOR_PIN;
+constexpr uint8_t TEST_BUTTON_PIN = INTERLOCK_TEST_BUTTON_PIN;
+constexpr uint8_t SAMPLE_COUNT = INTERLOCK_SAMPLE_COUNT;
+constexpr uint32_t SENSOR_WARMUP_MS = INTERLOCK_SENSOR_WARMUP_MS;
+constexpr uint32_t SAMPLE_INTERVAL_MS = INTERLOCK_SAMPLE_INTERVAL_MS;
+constexpr uint32_t TEST_INTERVAL_MS = INTERLOCK_TEST_INTERVAL_MS;
+constexpr uint32_t HEARTBEAT_INTERVAL_MS = INTERLOCK_HEARTBEAT_INTERVAL_MS;
+constexpr uint32_t WATCHDOG_TIMEOUT_SECONDS =
+    INTERLOCK_WATCHDOG_TIMEOUT_SECONDS;
+constexpr float DEMO_THRESHOLD = INTERLOCK_DEMO_THRESHOLD;
 
 DeviceState state = DeviceState::BOOTING;
 uint32_t booted_at = 0;
