@@ -94,6 +94,10 @@ The consolidated product runbook is in
 `docs/PRODUCT_IMPLEMENTATION.md`. It maps every implemented module to its
 startup, end-to-end acceptance, security, hardware, and production workflow.
 
+For delivery status, exact implementation inventory, hardware/software
+handoff, validation evidence, and remaining physical vehicle gates, see
+`docs/COMPLETION_HANDOFF.md`.
+
 ## Hardware implementation status
 
 The repository now includes a PlatformIO ESP32 bench application, wiring/pin
