@@ -69,3 +69,18 @@ py -3 -m uvicorn app.main:app --reload
 changing or replacing the existing Node application. See
 `shared/api-types.md`, `hardware/esp32/`, and `simulator/` for the device
 boundary and signed-reading contract.
+
+## Additional service boundaries
+
+- `services/ai-engine` provides deterministic feature extraction and bounded
+  anomaly scoring as advisory metadata only. It cannot authorize or unblock a
+  vehicle.
+- `services/notification-service` provides a durable notification outbox and
+  provider interfaces for in-app, email, SMS, and push workers. Enqueueing is
+  not delivery.
+- `simulator/device_simulator.py` generates signed test payloads without
+  pretending to be certified hardware.
+
+Operational, privacy, security, hardware, deployment, API, and architecture
+guidance is in `docs/`. See `docs/OPERATIONS.md` for the local end-to-end
+startup sequence and production gates.

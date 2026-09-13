@@ -11,6 +11,9 @@ class LoginIn(BaseModel):
     email: EmailStr
     password: str
 
+class RefreshIn(BaseModel):
+    refresh_token: str = Field(min_length=20, max_length=200)
+
 
 class OrganizationIn(BaseModel):
     name: str = Field(min_length=2, max_length=200)
@@ -73,3 +76,7 @@ class NotificationIn(BaseModel):
     title: str = Field(min_length=2, max_length=200)
     message: str = Field(min_length=1, max_length=2000)
     user_id: int | None = None
+
+class PasswordChangeIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=12, max_length=128)

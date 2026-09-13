@@ -68,8 +68,8 @@ def login(payload: LoginIn, db: Session = Depends(get_db)):
     return {"access_token": token_for(user), "refresh_token": refresh_token, "token_type": "bearer"}
 
 @app.post("/auth/refresh")
-def refresh(payload: dict, db: Session = Depends(get_db)):
-    raw = payload.get("refresh_token", "")
+def refresh(payload: RefreshIn, db: Session = Depends(get_db)):
+    raw = payload.refresh_token
     row = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == hashlib.sha256(raw.encode()).hexdigest(), RefreshToken.revoked_at.is_(None)))
     if not row or (row.expires_at.replace(tzinfo=timezone.utc) if row and row.expires_at.tzinfo is None else row.expires_at) < datetime.now(timezone.utc): raise HTTPException(401, "Authentication failed")
     user = db.get(User, row.user_id)
@@ -78,6 +78,33 @@ def refresh(payload: dict, db: Session = Depends(get_db)):
     new_raw = refresh_for(user, db)
     db.commit()
     return {"access_token": token_for(user), "refresh_token": new_raw, "token_type": "bearer"}
+
+@app.post("/auth/logout")
+def logout(payload: RefreshIn, db: Session = Depends(get_db), user=Depends(current_user)):
+    row = db.scalar(select(RefreshToken).where(
+        RefreshToken.user_id == user.id,
+        RefreshToken.token_hash == hashlib.sha256(payload.refresh_token.encode()).hexdigest(),
+        RefreshToken.revoked_at.is_(None)))
+    if row:
+        row.revoked_at = datetime.now(timezone.utc)
+        audit(db, user, "logout", "session")
+        db.commit()
+    return {"ok": True}
+
+@app.get("/auth/me")
+def me(user=Depends(current_user)):
+    return {"id": user.id, "email": user.email, "role": user.role, "organization_id": user.organization_id}
+
+@app.post("/auth/password")
+def change_password(payload: PasswordChangeIn, db: Session = Depends(get_db), user=Depends(current_user)):
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(400, "Current password is invalid")
+    user.password_hash = hash_password(payload.new_password)
+    db.query(RefreshToken).filter(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None)).update(
+        {RefreshToken.revoked_at: datetime.now(timezone.utc)}, synchronize_session=False)
+    audit(db, user, "password_changed", "user")
+    db.commit()
+    return {"ok": True}
 
 @app.post("/organizations")
 def create_org(payload: OrganizationIn, db: Session = Depends(get_db), user=Depends(require_roles("ADMIN","OPERATOR"))):

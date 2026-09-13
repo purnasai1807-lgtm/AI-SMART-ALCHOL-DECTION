@@ -16,3 +16,12 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run lint
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r services/api/requirements.txt
+      - run: python -m pytest services/api/tests -q
+      - run: python -m pip install -r services/ai-engine/requirements.txt
+      - run: python -m pytest services/ai-engine/tests -q
+      - run: python -m pip install -r services/notification-service/requirements.txt
+      - run: python -m pytest services/notification-service/tests -q

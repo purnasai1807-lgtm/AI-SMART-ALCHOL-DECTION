@@ -16,5 +16,11 @@ services:
     volumes: [interlock-data:/var/lib/postgresql/data]
   redis:
     image: redis:7-alpine
+  ai-engine:
+    build: ./services/ai-engine
+    ports: ["8001:8000"]
+  notification-service:
+    build: ./services/notification-service
+    ports: ["8002:8000"]
 volumes:
   interlock-data:
