@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     environment: str = "test"
     login_rate_limit: int = 10
     login_rate_window_seconds: int = 60
+    auto_create_schema: bool = True
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @model_validator(mode="after")
@@ -22,6 +23,8 @@ class Settings(BaseSettings):
             raise ValueError("JWT_SECRET must be changed in production")
         if self.environment.lower() in ("production", "prod") and not self.device_encryption_key:
             raise ValueError("DEVICE_ENCRYPTION_KEY must be configured in production")
+        if self.environment.lower() in ("production", "prod") and self.auto_create_schema:
+            raise ValueError("AUTO_CREATE_SCHEMA must be false in production; run migrations explicitly")
         return self
 
 

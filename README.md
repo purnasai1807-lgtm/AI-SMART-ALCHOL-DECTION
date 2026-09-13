@@ -57,11 +57,14 @@ npm run lint
 The additive `services/api` package provides a SQLAlchemy-backed FastAPI
 service for organizations, vehicles, drivers, devices, authentication, and
 fail-secure safety decisions. It defaults to SQLite for the demo flow and
-accepts PostgreSQL and Redis URLs in production. Start it with:
+accepts PostgreSQL and Redis URLs in production. Development may use automatic
+schema creation; production must set `AUTO_CREATE_SCHEMA=false` and run the
+reviewed Alembic migration before starting:
 
 ```sh
 cd services/api
 py -3 -m pip install -r requirements.txt
+alembic upgrade head
 py -3 -m uvicorn app.main:app --reload
 ```
 

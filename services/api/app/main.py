@@ -13,7 +13,8 @@ from .schemas import *
 from .security import *
 from .config import settings
 
-Base.metadata.create_all(engine)
+if settings.auto_create_schema:
+    Base.metadata.create_all(engine)
 app = FastAPI(title="Interlock Safety API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in settings.cors_origins.split(",") if x.strip()], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 @app.middleware("http")
@@ -110,17 +111,38 @@ def change_password(payload: PasswordChangeIn, db: Session = Depends(get_db), us
 def create_org(payload: OrganizationIn, db: Session = Depends(get_db), user=Depends(require_roles("ADMIN","OPERATOR"))):
     org = Organization(name=payload.name); db.add(org); db.commit(); db.refresh(org); return {"id": org.id, "name": org.name}
 
+@app.get("/organizations")
+def list_orgs(db: Session = Depends(get_db), user=Depends(require_roles("ADMIN","OPERATOR"))):
+    query = select(Organization)
+    if user.role != "ADMIN":
+        query = query.where(Organization.id == user.organization_id)
+    return db.scalars(query.order_by(Organization.name)).all()
+
 @app.post("/vehicles")
 def create_vehicle(payload: VehicleIn, db: Session = Depends(get_db), user=Depends(current_user)):
     if user.role != "ADMIN" and user.organization_id != payload.organization_id: raise HTTPException(403, "Forbidden")
     if not db.get(Organization, payload.organization_id): raise HTTPException(404, "Organization not found")
     v = Vehicle(registration=payload.registration, organization_id=payload.organization_id); db.add(v); db.commit(); db.refresh(v); return {"id": v.id, "status": v.status}
 
+@app.get("/vehicles")
+def list_vehicles(db: Session = Depends(get_db), user=Depends(current_user)):
+    query = select(Vehicle)
+    if user.role != "ADMIN":
+        query = query.where(Vehicle.organization_id == user.organization_id)
+    return db.scalars(query.order_by(Vehicle.registration)).all()
+
 @app.post("/drivers")
 def create_driver(payload: DriverIn, db: Session = Depends(get_db), user=Depends(require_roles("ADMIN","OPERATOR"))):
     if user.role != "ADMIN" and user.organization_id != payload.organization_id: raise HTTPException(403, "Forbidden")
     if not db.get(Organization, payload.organization_id): raise HTTPException(404, "Organization not found")
     d = Driver(**payload.model_dump()); db.add(d); db.commit(); db.refresh(d); return {"id": d.id}
+
+@app.get("/drivers")
+def list_drivers(db: Session = Depends(get_db), user=Depends(require_roles("ADMIN","OPERATOR"))):
+    query = select(Driver)
+    if user.role != "ADMIN":
+        query = query.where(Driver.organization_id == user.organization_id)
+    return db.scalars(query.order_by(Driver.name)).all()
 
 @app.post("/devices")
 def create_device(payload: DeviceIn, db: Session = Depends(get_db), user=Depends(require_roles("ADMIN","OPERATOR"))):
@@ -129,6 +151,13 @@ def create_device(payload: DeviceIn, db: Session = Depends(get_db), user=Depends
     if user.role != "ADMIN" and user.organization_id != vehicle.organization_id: raise HTTPException(403, "Forbidden")
     d = Device(serial=payload.serial, vehicle_id=payload.vehicle_id, secret_ciphertext=encrypt_device_secret(payload.secret))
     db.add(d); db.commit(); db.refresh(d); return {"id": d.id, "serial": d.serial}
+
+@app.get("/devices")
+def list_devices(db: Session = Depends(get_db), user=Depends(require_roles("ADMIN","OPERATOR"))):
+    query = select(Device).join(Vehicle, Device.vehicle_id == Vehicle.id)
+    if user.role != "ADMIN":
+        query = query.where(Vehicle.organization_id == user.organization_id)
+    return db.scalars(query.order_by(Device.serial)).all()
 
 @app.post("/decisions", response_model=DecisionOut)
 def decide(payload: SensorReading, db: Session = Depends(get_db), user=Depends(current_user)):
@@ -225,8 +254,24 @@ def sensor_test(payload: SensorTestIn, db: Session = Depends(get_db), user=Depen
         else: decision, reason = "BLOCK", "above_threshold"
     row = SensorTest(vehicle_id=payload.vehicle_id, device_id=payload.device_id, samples=samples, decision=decision, reason=reason)
     db.add(row)
-    db.add(Notification(organization_id=db.get(Vehicle, payload.vehicle_id).organization_id,
-                         title="Device unavailable", message="Vehicle start remains blocked because the safety device is unavailable."))
+    vehicle = db.get(Vehicle, payload.vehicle_id)
+    vehicle.status = decision
+    linked_decision = Decision(
+        vehicle_id=payload.vehicle_id,
+        device_id=payload.device_id,
+        reading=sum(samples) / len(samples) if samples else None,
+        decision=decision,
+        reason=reason,
+    )
+    db.add(linked_decision)
+    db.flush()
+    if decision in ("BLOCK", "ERROR"):
+        db.add(Incident(decision_id=linked_decision.id, severity="HIGH"))
+        db.add(Notification(
+            organization_id=vehicle.organization_id,
+            title="Vehicle start blocked",
+            message=f"Safety test blocked vehicle start: {reason}.",
+        ))
     db.commit(); db.refresh(row)
     return {"id": row.id, "decision": decision, "reason": reason, "samples": samples}
 
@@ -248,7 +293,15 @@ def acknowledge(incident_id: int, db: Session = Depends(get_db), user=Depends(cu
 
 @app.get("/notifications")
 def notifications(db: Session = Depends(get_db), user=Depends(current_user)):
-    return db.scalars(select(Notification).where((Notification.user_id == user.id) | (Notification.user_id.is_(None))).order_by(Notification.created_at.desc())).all()
+    query = select(Notification).where(
+        ((Notification.user_id == user.id) | (Notification.user_id.is_(None)))
+    )
+    if user.role != "ADMIN":
+        query = query.where(
+            (Notification.organization_id == user.organization_id)
+            | (Notification.organization_id.is_(None))
+        )
+    return db.scalars(query.order_by(Notification.created_at.desc()).limit(100)).all()
 
 @app.post("/notifications")
 def create_notification(payload: NotificationIn, db: Session = Depends(get_db), user=Depends(require_roles("ADMIN","OPERATOR"))):
