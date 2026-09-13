@@ -79,8 +79,10 @@ boundary and signed-reading contract.
   anomaly scoring as advisory metadata only. It cannot authorize or unblock a
   vehicle.
 - `services/notification-service` provides a durable notification outbox and
-  provider interfaces for in-app, email, SMS, and push workers. Enqueueing is
-  not delivery.
+  provider interfaces plus a separate retrying worker for in-app, email, SMS,
+  and push delivery. Enqueueing is not delivery.
+- The FastAPI service supports encrypted TOTP MFA enrollment, organization-
+  scoped WebSocket safety updates, and reviewed Alembic migrations.
 - `simulator/device_simulator.py` generates signed test payloads without
   pretending to be certified hardware.
 

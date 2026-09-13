@@ -3,6 +3,7 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 from cryptography.fernet import Fernet
 import jwt
+import pyotp
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
@@ -64,3 +65,20 @@ def encrypt_device_secret(secret):
 
 def decrypt_device_secret(ciphertext):
     return _fernet().decrypt(ciphertext.encode()).decode()
+
+def encrypt_mfa_secret(secret):
+    return _fernet().encrypt(secret.encode()).decode()
+
+def decrypt_mfa_secret(ciphertext):
+    return _fernet().decrypt(ciphertext.encode()).decode()
+
+def verify_mfa_code(user, code):
+    if not user.mfa_enabled or not user.mfa_secret_ciphertext or not code:
+        return False
+    try:
+        return verify_mfa_secret(decrypt_mfa_secret(user.mfa_secret_ciphertext), code)
+    except Exception:
+        return False
+
+def verify_mfa_secret(secret, code):
+    return bool(code) and pyotp.TOTP(secret).verify(code, valid_window=1)

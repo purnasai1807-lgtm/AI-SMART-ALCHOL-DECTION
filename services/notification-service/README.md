@@ -20,3 +20,8 @@ Set `NOTIFICATION_DATABASE_URL` to another SQLAlchemy URL; the default is
 `recipient`, `body`, optional email `subject`, and optional `metadata`, and
 returns `202 Accepted` with an outbox ID and `"status": "queued"`. Email and
 E.164 SMS recipients are validated.
+
+Run the delivery worker separately with `python -m app.worker`. In-app
+messages use a local provider; email, SMS, and push require deployment-specific
+provider adapters and explicit `*_PROVIDER_URL` configuration. Failed delivery
+is persisted and retried up to `NOTIFICATION_MAX_ATTEMPTS`.

@@ -21,6 +21,9 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(40), default="DRIVER")
     organization_id: Mapped[int | None] = mapped_column(ForeignKey("organizations.id"))
+    mfa_secret_ciphertext: Mapped[str | None] = mapped_column(String(512))
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    mfa_enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Vehicle(Base):

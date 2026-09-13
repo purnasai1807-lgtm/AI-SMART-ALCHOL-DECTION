@@ -1,13 +1,15 @@
-"""Provider contracts.
+"""Provider contracts and safe development adapters.
 
-Implementations are deliberately kept outside this service. Enqueuing a message
-does not imply that a third-party provider accepted or delivered it.
+Third-party delivery is opt-in. No provider silently reports success without
+an explicit configured endpoint or credential.
 """
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+import os
+import uuid
 
 
 class NotificationChannel(StrEnum):
@@ -40,14 +42,32 @@ class NotificationProvider(ABC):
 class InAppProvider(NotificationProvider):
     channel = NotificationChannel.IN_APP
 
+    def send(self, notification: Notification) -> str:
+        return f"in-app-{uuid.uuid4()}"
+
 
 class EmailProvider(NotificationProvider):
     channel = NotificationChannel.EMAIL
+
+    def send(self, notification: Notification) -> str:
+        if not os.getenv("EMAIL_PROVIDER_URL"):
+            raise RuntimeError("EMAIL_PROVIDER_URL is not configured")
+        raise RuntimeError("Email provider adapter requires deployment-specific integration")
 
 
 class SmsProvider(NotificationProvider):
     channel = NotificationChannel.SMS
 
+    def send(self, notification: Notification) -> str:
+        if not os.getenv("SMS_PROVIDER_URL"):
+            raise RuntimeError("SMS_PROVIDER_URL is not configured")
+        raise RuntimeError("SMS provider adapter requires deployment-specific integration")
+
 
 class PushProvider(NotificationProvider):
     channel = NotificationChannel.PUSH
+
+    def send(self, notification: Notification) -> str:
+        if not os.getenv("PUSH_PROVIDER_URL"):
+            raise RuntimeError("PUSH_PROVIDER_URL is not configured")
+        raise RuntimeError("Push provider adapter requires deployment-specific integration")

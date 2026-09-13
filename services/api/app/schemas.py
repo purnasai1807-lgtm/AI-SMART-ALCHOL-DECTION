@@ -10,6 +10,11 @@ class RegisterIn(BaseModel):
 class LoginIn(BaseModel):
     email: EmailStr
     password: str
+    mfa_code: str | None = Field(default=None, pattern=r"^\d{6}$")
+    otp: str | None = Field(default=None, pattern=r"^\d{6}$")
+
+class MFAVerifyIn(BaseModel):
+    code: str = Field(pattern=r"^\d{6}$")
 
 class RefreshIn(BaseModel):
     refresh_token: str = Field(min_length=20, max_length=200)

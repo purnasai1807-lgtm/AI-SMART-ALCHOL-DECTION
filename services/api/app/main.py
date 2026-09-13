@@ -2,7 +2,9 @@ from datetime import datetime, timezone
 import csv, io
 from datetime import timedelta
 import hashlib, secrets
-from fastapi import Depends, FastAPI, HTTPException, Request
+import asyncio
+import pyotp
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
@@ -11,11 +13,45 @@ from .db import Base, engine, get_db
 from .models import *
 from .schemas import *
 from .security import *
+from .security import _login_attempts, jwt
 from .config import settings
 
 if settings.auto_create_schema:
     Base.metadata.create_all(engine)
 app = FastAPI(title="Interlock Safety API", version="1.0.0")
+
+class OrganizationUpdates:
+    def __init__(self):
+        self._subscribers: dict[int, dict[asyncio.Queue, asyncio.AbstractEventLoop]] = {}
+
+    async def subscribe(self, organization_id: int):
+        queue = asyncio.Queue(maxsize=100)
+        self._subscribers.setdefault(organization_id, {})[queue] = asyncio.get_running_loop()
+        return queue
+
+    def unsubscribe(self, organization_id: int, queue):
+        self._subscribers.get(organization_id, {}).pop(queue, None)
+
+    def publish(self, organization_id: int, event: dict):
+        for queue, loop in tuple(self._subscribers.get(organization_id, {}).items()):
+            loop.call_soon_threadsafe(self._publish_to_queue, queue, event)
+
+    @staticmethod
+    def _publish_to_queue(queue: asyncio.Queue, event: dict):
+        try:
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            # A slow client must not block safety writes.
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
+
+updates = OrganizationUpdates()
 app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in settings.cors_origins.split(",") if x.strip()], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
@@ -64,9 +100,44 @@ def login(payload: LoginIn, db: Session = Depends(get_db)):
     attempts.append(now)
     user = db.scalar(select(User).where(User.email == payload.email))
     if not user or not verify_password(payload.password, user.password_hash): raise HTTPException(401, "Authentication failed")
+    if user.mfa_enabled and not verify_mfa_code(user, payload.mfa_code or payload.otp):
+        raise HTTPException(401, "MFA verification required")
     audit(db, user, "login", "user"); db.commit()
     refresh_token = refresh_for(user, db); db.commit()
     return {"access_token": token_for(user), "refresh_token": refresh_token, "token_type": "bearer"}
+
+@app.post("/auth/mfa/enroll")
+def mfa_enroll(db: Session = Depends(get_db), user=Depends(current_user)):
+    secret = pyotp.random_base32()
+    user.mfa_secret_ciphertext = encrypt_mfa_secret(secret)
+    user.mfa_enabled = False
+    user.mfa_enrolled_at = None
+    db.commit()
+    return {"secret": secret, "otpauth_url": pyotp.TOTP(secret).provisioning_uri(name=user.email, issuer_name="Interlock")}
+
+@app.post("/auth/mfa/verify")
+def mfa_verify(payload: MFAVerifyIn, db: Session = Depends(get_db), user=Depends(current_user)):
+    try:
+        valid = bool(user.mfa_secret_ciphertext) and verify_mfa_secret(
+            decrypt_mfa_secret(user.mfa_secret_ciphertext), payload.code)
+    except Exception:
+        valid = False
+    if not valid:
+        raise HTTPException(400, "Invalid MFA code")
+    user.mfa_enabled = True
+    user.mfa_enrolled_at = datetime.now(timezone.utc)
+    audit(db, user, "mfa_enabled", "user")
+    db.commit()
+    return {"enabled": True}
+
+@app.post("/auth/mfa/disable")
+def mfa_disable(db: Session = Depends(get_db), user=Depends(current_user)):
+    user.mfa_enabled = False
+    user.mfa_secret_ciphertext = None
+    user.mfa_enrolled_at = None
+    audit(db, user, "mfa_disabled", "user")
+    db.commit()
+    return {"enabled": False}
 
 @app.post("/auth/refresh")
 def refresh(payload: RefreshIn, db: Session = Depends(get_db)):
@@ -188,6 +259,8 @@ def decide(payload: SensorReading, db: Session = Depends(get_db), user=Depends(c
         db.add(Notification(organization_id=vehicle.organization_id,
                              title="Vehicle start blocked", message=f"Attested decision blocked vehicle start: {reason}."))
     audit(db, user, "safety_decision", "decision", {"decision": outcome, "reason": reason}); db.commit(); db.refresh(decision)
+    updates.publish(vehicle.organization_id, {"type": "decision", "vehicle_id": vehicle.id, "decision": decision.decision,
+                                               "reason": decision.reason, "id": decision.id, "created_at": decision.created_at.isoformat()})
     return decision
 
 @app.post("/drivers/assign")
@@ -247,6 +320,9 @@ def sensor_test(payload: SensorTestIn, db: Session = Depends(get_db), user=Depen
             db.add(Notification(organization_id=db.get(Vehicle, payload.vehicle_id).organization_id,
                                  title="Vehicle start blocked", message=f"Safety test blocked vehicle start: {reason}."))
         db.commit(); db.refresh(row)
+        updates.publish(db.get(Vehicle, payload.vehicle_id).organization_id, {
+            "type": "decision", "vehicle_id": payload.vehicle_id, "decision": row.decision,
+            "reason": row.reason, "id": row.id, "created_at": row.created_at.isoformat()})
         return {"id": row.id, "decision": decision, "reason": reason, "samples": samples}
     if all(0 <= x <= 10 for x in samples) and len(samples) >= 3:
         if max(samples)-min(samples) > 0.05: decision, reason = "RETEST", "inconsistent_samples"
@@ -273,6 +349,10 @@ def sensor_test(payload: SensorTestIn, db: Session = Depends(get_db), user=Depen
             message=f"Safety test blocked vehicle start: {reason}.",
         ))
     db.commit(); db.refresh(row)
+    updates.publish(vehicle.organization_id, {
+        "type": "decision", "vehicle_id": vehicle.id, "decision": linked_decision.decision,
+        "reason": linked_decision.reason, "id": linked_decision.id,
+        "created_at": linked_decision.created_at.isoformat()})
     return {"id": row.id, "decision": decision, "reason": reason, "samples": samples}
 
 @app.get("/incidents")
@@ -361,6 +441,39 @@ def status(vehicle_id: int, db: Session = Depends(get_db), user=Depends(current_
 def decisions(vehicle_id: int, db: Session = Depends(get_db), user=Depends(current_user)):
     check_vehicle_access(db.get(Vehicle, vehicle_id), user)
     return db.scalars(select(Decision).where(Decision.vehicle_id == vehicle_id).order_by(Decision.created_at.desc()).limit(100)).all()
+
+@app.websocket("/ws/organizations/{organization_id}")
+@app.websocket("/ws/organizations/{organization_id}/updates")
+async def organization_updates(websocket: WebSocket, organization_id: int):
+    token = websocket.query_params.get("token")
+    if not token:
+        authorization = websocket.headers.get("authorization", "")
+        token = authorization.removeprefix("Bearer ").strip() if authorization else None
+    if not token:
+        await websocket.close(code=1008)
+        return
+    try:
+        uid = int(jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])["sub"])
+        db = next(get_db())
+        try:
+            user = db.get(User, uid)
+            if not user or (user.role != "ADMIN" and user.organization_id != organization_id):
+                await websocket.close(code=1008)
+                return
+        finally:
+            db.close()
+    except Exception:
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    queue = await updates.subscribe(organization_id)
+    try:
+        while True:
+            await websocket.send_json(await queue.get())
+    except WebSocketDisconnect:
+        pass
+    finally:
+        updates.unsubscribe(organization_id, queue)
 
 @app.get("/audit")
 def audit_log(db: Session = Depends(get_db), user=Depends(require_roles("ADMIN","OPERATOR"))):
