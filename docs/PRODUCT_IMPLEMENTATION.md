@@ -134,3 +134,268 @@ completed safely by source code alone:
 Until those gates pass, GPIO26 must remain connected only to the isolated
 bench dummy load and the prototype sensor must not be treated as a legal BAC
 instrument.
+
+## Product definition
+
+### Problem
+
+The product provides a controlled safety workflow for testing a driver before
+vehicle operation. A device captures a breath/sensor reading, authenticates the
+reading, sends it to the safety service, and receives a deterministic decision.
+The decision is recorded for operators and can be consumed by a separately
+certified vehicle gateway.
+
+### Product goals
+
+- Prevent an authenticated positive or uncertain test from becoming an allow
+  decision.
+- Give fleet operators current vehicle, device, incident, and decision status.
+- Preserve an auditable record of every safety decision and administrative
+  action.
+- Support controlled device provisioning, revocation, replay protection, and
+  offline/error handling.
+- Keep advisory AI separate from the deterministic safety policy.
+- Provide a reproducible bench device and simulator for integration testing.
+
+### Non-goals
+
+- The prototype MQ-3 sensor is not a legal breathalyzer.
+- The browser, Node service, or ESP32 reference output must not directly switch
+  a starter, ignition, CAN bus, fuel pump, or vehicle relay.
+- AI anomaly scoring cannot override a deterministic block or grant permission
+  to start.
+- The repository does not claim regulatory, automotive functional-safety, or
+  government procurement certification.
+
+## Users and roles
+
+| Role | Capabilities |
+|---|---|
+| Administrator | Bootstrap system, organizations, operators, devices, reports, audit |
+| Operator | Manage assigned organization fleet, devices, incidents, notifications |
+| Driver | Authenticate, complete assigned tests, view permitted vehicle state |
+| Technical team | Provision and revoke devices in the legacy PWA workflow |
+| Safety reviewer | Review incidents, calibration evidence, audit records, and reports |
+
+Every organization-owned resource is scoped by organization. Administrators may
+operate across organizations; operators and drivers cannot select another
+organization through request payloads.
+
+## Safety decision model
+
+The safety service uses a fail-secure decision contract:
+
+| Input condition | Decision | Vehicle result |
+|---|---|---|
+| Fresh, signed, paired, non-replayed reading below configured threshold | `ALLOW`/`UNLOCKED` | May proceed to certified gateway |
+| Reading at/above threshold | `BLOCK`/`LOCKED` | Must remain stopped |
+| Inconsistent multi-sample test | `RETEST` | Must remain stopped until retest |
+| Missing device, unavailable sensor, invalid signature, stale timestamp, replay, malformed data, or internal error | `ERROR`/`LOCKED` | Must remain stopped |
+
+The API persists the decision, updates vehicle status, creates incidents for
+blocked/error paths, emits organization-scoped live events, and queues operator
+notifications. The vehicle gateway must independently fail closed if the API,
+device, power, network, or gateway watchdog is unavailable.
+
+## End-to-end data flow
+
+```mermaid
+sequenceDiagram
+    participant D as Driver
+    participant H as ESP32/device
+    participant API as Safety API
+    participant DB as PostgreSQL/SQLite
+    participant AI as Advisory AI
+    participant N as Notification worker
+    participant O as Operator PWA
+    participant G as Certified gateway
+
+    D->>H: Start pre-operation test
+    H->>H: Warm-up, self-test, five samples
+    H->>API: Signed reading + nonce + timestamp
+    API->>API: Verify device, HMAC, freshness, replay, tenancy
+    API->>DB: Persist decision, audit, incident/status
+    API->>AI: Optional advisory feature request
+    API->>N: Queue blocked/error notification
+    API-->>O: Organization-scoped WebSocket event
+    API-->>H: Deterministic ALLOW/BLOCK/RETEST/ERROR
+    H-->>G: Certified integration signal boundary
+    G->>G: Independent fail-secure enforcement
+```
+
+The AI request is informational only. It is never in the critical path that
+changes an allow/block decision.
+
+## Software component detail
+
+### Node/PWA
+
+The legacy Node/Express application provides the installable browser workflow:
+registration, session authentication, vehicle management, technical-team device
+pairing, simulator submission, fleet status, decision history, audit views, and
+service-worker/PWA assets. It remains available for the original demonstrator
+and uses the versioned `/api/v1/interlock` contract.
+
+### FastAPI safety API
+
+Important routes include:
+
+| Area | Routes |
+|---|---|
+| Authentication | `/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/password`, `/auth/me` |
+| MFA | `/auth/mfa/enroll`, `/auth/mfa/verify`, `/auth/mfa/disable` |
+| Fleet | `/organizations`, `/vehicles`, `/drivers`, `/assignments` |
+| Devices | `/devices`, `/devices/{id}/heartbeat`, `/devices/{id}/status`, `/devices/{id}/revoke` |
+| Safety | `/decisions`, `/sensor-tests`, `/vehicles/{id}/status`, `/vehicles/{id}/decisions` |
+| Operations | `/incidents`, `/notifications`, `/gps`, `/analytics/overview`, `/reports/decisions.csv`, `/audit` |
+| Live updates | `/ws/organizations/{organization_id}` |
+| Service health | `/health`, `/readiness` |
+
+Database entities include users, organizations, vehicles, drivers, driver
+assignments, devices, decisions, sensor tests, incidents, notifications,
+GPS points, audit logs, nonces, refresh tokens, and MFA state. Production
+schema changes are applied with Alembic.
+
+### AI engine
+
+The AI engine extracts bounded sensor features and produces anomaly metadata.
+It is advisory and must be deployed, monitored, evaluated, and versioned
+separately from the safety policy. A model failure must not convert a blocked
+or uncertain test into an allow.
+
+### Notification service
+
+The API queues notifications through the durable outbox boundary. The separate
+worker claims pending messages, invokes an explicitly configured provider,
+records provider IDs and delivery timestamps, and retries failures up to
+`NOTIFICATION_MAX_ATTEMPTS`. In-app delivery has a local adapter. Email, SMS,
+and push require deployment-specific provider implementations and credentials.
+
+## Data and security model
+
+### Device trust
+
+Each device is paired to one vehicle and receives a unique secret. The service
+encrypts the stored secret with Fernet. Signed readings include device ID,
+vehicle ID, nonce, timestamp, and reading in a canonical string. The service
+checks:
+
+1. Device exists, is enabled, and is not revoked.
+2. Device is paired to the submitted vehicle.
+3. HMAC signature matches the encrypted device secret.
+4. Nonce has not already been recorded.
+5. Timestamp is inside the configured freshness window.
+6. Reading and payload pass schema/range validation.
+
+### Account trust
+
+Passwords use PBKDF2-HMAC-SHA256 with per-password salts. Access tokens are
+short-lived JWTs; refresh tokens are hashed, rotated, and revoked on logout or
+password change. TOTP MFA secrets are encrypted at rest and MFA is required
+at login after enrollment. Role and organization checks are enforced on the
+server, not only in the UI.
+
+### Operational security
+
+Production must use non-default secrets, HTTPS/TLS, a managed secret store,
+restricted CORS, PostgreSQL, Redis where needed, backups, log retention,
+central monitoring, alerting, dependency scanning, key rotation, and
+least-privilege deployment identities. Never commit device secrets, JWT keys,
+passwords, certificates, or provider credentials.
+
+## Hardware product detail
+
+### Reference bill of materials
+
+- ESP32 DevKit with production secure boot/flash encryption capability
+- Calibrated sensor selected by the safety/electrical team; MQ-3 is bench-only
+- 5 V regulated supply and 3.3 V-safe ADC divider
+- 220 ohm LED resistor and status LED
+- Transistor-driven active buzzer
+- Momentary test button
+- Optocoupler or isolated MOSFET and LED/resistor dummy load
+- Enclosure, tamper switch, watchdog-capable power path, protected connectors
+- Optional GPS module on level-shifted UART2
+
+### Pin map
+
+| Pin | Signal | Rule |
+|---:|---|---|
+| GPIO34 | Sensor ADC | Never exceed 3.3 V; calibrated driver required |
+| GPIO2 | Status LED | Current-limited LED only |
+| GPIO25 | Buzzer | Transistor driver; no high-current load |
+| GPIO26 | Bench output | Isolated LED/dummy load only |
+| GPIO27 | Test button | Momentary switch to ground |
+| GPIO16/17 | GPS UART2 | Level-shift modules above 3.3 V |
+
+### Firmware states
+
+`BOOTING` initializes outputs low; `SELF_TEST` validates the sensor;
+`READY` waits for warm-up or a button; `TESTING` captures five samples;
+`ANALYZING` evaluates consistency; `SAFE` asserts only the isolated bench
+output temporarily; `BLOCKED` deasserts output and alerts; `ERROR` deasserts
+output for missing/noisy faults; `OFFLINE` is reserved for a future transport
+implementation. Watchdog reset is treated as fail-secure.
+
+## Deployment topology
+
+### Local/demo
+
+Node/PWA runs on port 3000. FastAPI runs on port 8000. AI engine runs on port
+8001 and notification API on port 8002. Docker Compose supplies PostgreSQL and
+Redis for the multi-service path.
+
+### Production target
+
+Use a managed container platform behind HTTPS with private database/network
+endpoints, managed PostgreSQL, Redis, secret storage, centralized logs and
+metrics, health/readiness probes, autoscaling, backup/restore, and a separate
+notification worker. Run Alembic migrations as a deployment step before
+starting API replicas. The API should not auto-create production schemas.
+
+## Validation and acceptance
+
+Run the repository checks:
+
+```sh
+npm test
+npm run lint
+py -3 -m pytest services/api/tests -q
+py -3 -m pytest services/ai-engine/tests -q
+py -3 -m pytest services/notification-service/tests -q
+pio run -d hardware/esp32
+```
+
+Acceptance requires all checks to pass and manual confirmation of:
+
+- valid negative reading allows only through the approved gateway boundary;
+- positive, stale, replayed, malformed, missing, and noisy cases remain blocked;
+- cross-organization API and WebSocket access is denied;
+- revoked devices cannot produce allow decisions;
+- notification failures retry without changing safety outcomes;
+- ESP32 reset, sensor failure, power loss, and watchdog paths leave output low;
+- no real vehicle wiring is present during bench tests.
+
+## Support and incident response
+
+For a blocked vehicle, preserve the decision ID, device ID, nonce, timestamp,
+sensor evidence, firmware version, operator, and organization. Do not manually
+override a blocked decision through the browser. Escalate to the authorized
+safety/operator process, inspect device status and audit logs, and use the
+approved manual recovery policy only after safety review.
+
+For a suspected compromised device, revoke it immediately, preserve logs,
+rotate its secret, inspect replay/signature failures, and replace/re-provision
+the hardware. For a suspected account compromise, revoke refresh tokens,
+disable MFA enrollment if necessary, rotate affected credentials, and review
+audit events.
+
+## Final delivery statement
+
+The repository delivers the application source, APIs, service boundaries,
+security controls, database migrations, simulator, notification worker,
+ESP32 firmware, hardware configuration, documentation, CI, and tests needed
+for a demonstrator and integration program. It is not a substitute for the
+certified automotive controller, legal breathalyzer, regulatory evidence,
+physical installation, or independent safety and cybersecurity approval
+required for a government production product.
