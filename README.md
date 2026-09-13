@@ -1,4 +1,4 @@
-# Interlock / TensorHub demonstrator
+# Interlock  demonstrator
 
 This repository includes the original TensorHub event and challenge features plus a secure, end-to-end alcohol-detection vehicle interlock demonstrator. The installable responsive PWA exposes versioned `/api/v1/interlock` APIs, SQL.js persistence, simulator/device HMAC attestation, nonce replay and timestamp freshness checks, authenticated roles, and append-only decisions/audit records.
 
