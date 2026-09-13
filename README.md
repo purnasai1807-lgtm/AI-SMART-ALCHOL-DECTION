@@ -84,3 +84,13 @@ boundary and signed-reading contract.
 Operational, privacy, security, hardware, deployment, API, and architecture
 guidance is in `docs/`. See `docs/OPERATIONS.md` for the local end-to-end
 startup sequence and production gates.
+
+## Hardware implementation status
+
+The repository now includes a PlatformIO ESP32 bench application, wiring/pin
+map, state machine, simulator CLI, and circuit diagram in
+`hardware/esp32/README.md` and `docs/HARDWARE.md`. The circuit is intentionally
+limited to a dummy load. A legally deployable vehicle system still requires
+certified sensor calibration, secure automotive gateway/ECU integration,
+electrical safety review, firmware signing, tamper controls, and jurisdictional
+approval; those cannot be honestly completed in software alone.
